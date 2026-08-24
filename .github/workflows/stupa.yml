@@ -1,0 +1,42 @@
+name: Test Supabase API
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test REST /scans
+        env:
+          SUPABASE_KEY: sb_publishable_UP0iNN9gSSM-46Kn8GpFHw_wOfaqh1
+        run: |
+          echo "=== GET /rest/v1/scans ==="
+          curl -sS -i \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Accept: application/json" \
+            "https://kgkivhuppcoghmlbqkfo.supabase.co/rest/v1/scans?select=*" \
+            || true
+
+      - name: Test /scans/unlocked/bucket
+        env:
+          SUPABASE_KEY: sb_publishable_UP0iNN9gSSM-46Kn8GpFHw_wOfaqh1
+        run: |
+          echo
+          echo "=== GET /scans/unlocked/bucket ==="
+          curl -sS -i \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Accept: application/json" \
+            "https://kgkivhuppcoghmlbqkfo.supabase.co/scans/unlocked/bucket" \
+            || true
+
+      - name: Test Storage public endpoint
+        run: |
+          echo
+          echo "=== Storage endpoint ==="
+          curl -sS -i \
+            "https://kgkivhuppcoghmlbqkfo.supabase.co/storage/v1/object/public/catalog-images/catalog/images/back/catalog_0036_back.jpg" \
+            || true
