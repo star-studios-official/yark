@@ -1,0 +1,115 @@
+name: Analyze Hermes APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract APK
+        run: |
+          set -eux
+          mkdir apk
+          unzip -q YKWArkScanner.apk -d apk
+          test -f apk/assets/index.android.bundle
+
+      - name: Install Hermes tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install hermes-dec
+
+      - name: Identify Hermes version
+        run: |
+          hbc-file-parser apk/assets/index.android.bundle \
+            > hermes-header.txt || true
+
+          cat hermes-header.txt
+
+      - name: Disassemble Hermes bundle
+        run: |
+          hbc-disassembler \
+            apk/assets/index.android.bundle \
+            app.hasm
+
+      - name: Decompile Hermes bundle
+        run: |
+          hbc-decompiler \
+            apk/assets/index.android.bundle \
+            app.js
+
+      - name: Extract strings
+        run: |
+          strings -a apk/assets/index.android.bundle > bundle-strings.txt
+
+      - name: Search application/API code
+        run: |
+          mkdir -p analysis
+
+          grep -Ein \
+            'supabase|createClient|SUPABASE|apikey|publishable|anon|rest/v1|storage/v1|storage|bucket|scans|dump|dump_binary|buildDumpExports|catalog_item_id|catalogImageUrl|catalogName|unlocked|signed|createSignedUrl|download' \
+            app.hasm \
+            > analysis/relevant-disassembly.txt || true
+
+          grep -Ein \
+            'supabase|createClient|SUPABASE|apikey|publishable|anon|rest/v1|storage/v1|storage|bucket|scans|dump|dump_binary|buildDumpExports|catalog_item_id|catalogImageUrl|catalogName|unlocked|signed|createSignedUrl|download' \
+            app.js \
+            > analysis/relevant-decompiled.txt || true
+
+          grep -Ein \
+            'https?://|/rest/|/storage/|/scans|bucket|\.bin|catalog/images|mark-dumps|catalog-images|unknown-photos' \
+            bundle-strings.txt \
+            > analysis/relevant-strings.txt || true
+
+      - name: Find contexts around important strings
+        run: |
+          mkdir -p analysis/context
+
+          for term in \
+            'createClient' \
+            'SUPABASE' \
+            'buildDumpExports' \
+            'dump_binary' \
+            'catalog_item_id' \
+            'scans' \
+            'unlocked' \
+            'mark-dumps' \
+            'catalog-images' \
+            'unknown-photos' \
+            'storage/v1' \
+            'rest/v1'
+          do
+            echo "===== $term =====" \
+              > "analysis/context/${term//\//_}.txt"
+
+            grep -Ein -C 15 "$term" app.hasm \
+              >> "analysis/context/${term//\//_}.txt" || true
+          done
+
+      - name: Search native APK resources
+        run: |
+          mkdir -p analysis/native
+
+          find apk -type f \
+            \( -name '*.xml' -o -name '*.json' -o -name '*.properties' \
+               -o -name '*.txt' -o -name '*.smali' \) \
+            -print0 2>/dev/null |
+          xargs -0 grep -Ein \
+            'supabase|SUPABASE|apikey|publishable|bucket|scans|dump|storage' \
+            > analysis/native/config-search.txt || true
+
+      - name: Package analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-analysis
+          path: |
+            hermes-header.txt
+            app.hasm
+            app.js
+            bundle-strings.txt
+            analysis/
+          retention-days: 7
