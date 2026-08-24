@@ -1,115 +1,531 @@
-name: Analyze Hermes APK
+name: Analyze YKWArkScanner Hermes
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # Locate the APK
+      # ============================================================
+      - name: Locate APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          APK="$(find . -maxdepth 3 -type f -iname '*.apk' -print -quit || true)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found."
+            echo
+            find . -maxdepth 4 -type f | sort
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          cp "$APK" YKWArkScanner.apk
+
+          echo
+          echo "APK size:"
+          ls -lh YKWArkScanner.apk
+
+      # ============================================================
+      # Extract APK
+      # ============================================================
       - name: Extract APK
+        shell: bash
         run: |
-          set -eux
-          mkdir apk
+          set -euxo pipefail
+
+          rm -rf apk
+          mkdir -p apk
+
           unzip -q YKWArkScanner.apk -d apk
-          test -f apk/assets/index.android.bundle
 
-      - name: Install Hermes tooling
+          echo "APK extracted."
+
+          echo
+          echo "Top-level contents:"
+          find apk -maxdepth 2 -type f | sort | head -300
+
+      # ============================================================
+      # Locate Hermes bundle
+      # ============================================================
+      - name: Locate Hermes bundle
+        shell: bash
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install hermes-dec
+          set -euxo pipefail
 
-      - name: Identify Hermes version
-        run: |
-          hbc-file-parser apk/assets/index.android.bundle \
-            > hermes-header.txt || true
+          BUNDLE="$(find apk \
+            -type f \
+            -name 'index.android.bundle' \
+            -print -quit)"
 
-          cat hermes-header.txt
+          if [ -z "$BUNDLE" ]; then
+            echo "ERROR: index.android.bundle not found."
 
-      - name: Disassemble Hermes bundle
-        run: |
-          hbc-disassembler \
-            apk/assets/index.android.bundle \
-            app.hasm
+            echo
+            echo "Possible JavaScript bundles:"
+            find apk -type f \
+              \( -name '*.bundle' -o -name '*.js' \) \
+              -print | sort | head -300
 
-      - name: Decompile Hermes bundle
-        run: |
-          hbc-decompiler \
-            apk/assets/index.android.bundle \
-            app.js
+            exit 1
+          fi
 
-      - name: Extract strings
-        run: |
-          strings -a apk/assets/index.android.bundle > bundle-strings.txt
+          echo "Hermes bundle:"
+          echo "$BUNDLE"
 
-      - name: Search application/API code
-        run: |
           mkdir -p analysis
+          cp "$BUNDLE" analysis/index.android.bundle
 
-          grep -Ein \
-            'supabase|createClient|SUPABASE|apikey|publishable|anon|rest/v1|storage/v1|storage|bucket|scans|dump|dump_binary|buildDumpExports|catalog_item_id|catalogImageUrl|catalogName|unlocked|signed|createSignedUrl|download' \
-            app.hasm \
-            > analysis/relevant-disassembly.txt || true
+          echo
+          echo "Bundle information:"
+          file analysis/index.android.bundle
+          ls -lh analysis/index.android.bundle
 
-          grep -Ein \
-            'supabase|createClient|SUPABASE|apikey|publishable|anon|rest/v1|storage/v1|storage|bucket|scans|dump|dump_binary|buildDumpExports|catalog_item_id|catalogImageUrl|catalogName|unlocked|signed|createSignedUrl|download' \
-            app.js \
-            > analysis/relevant-decompiled.txt || true
-
-          grep -Ein \
-            'https?://|/rest/|/storage/|/scans|bucket|\.bin|catalog/images|mark-dumps|catalog-images|unknown-photos' \
-            bundle-strings.txt \
-            > analysis/relevant-strings.txt || true
-
-      - name: Find contexts around important strings
+      # ============================================================
+      # Verify ABIs / native Hermes libraries
+      # ============================================================
+      - name: Inspect native libraries
+        shell: bash
         run: |
-          mkdir -p analysis/context
+          set -euxo pipefail
 
-          for term in \
-            'createClient' \
-            'SUPABASE' \
-            'buildDumpExports' \
-            'dump_binary' \
-            'catalog_item_id' \
-            'scans' \
-            'unlocked' \
-            'mark-dumps' \
-            'catalog-images' \
-            'unknown-photos' \
-            'storage/v1' \
-            'rest/v1'
-          do
-            echo "===== $term =====" \
-              > "analysis/context/${term//\//_}.txt"
-
-            grep -Ein -C 15 "$term" app.hasm \
-              >> "analysis/context/${term//\//_}.txt" || true
-          done
-
-      - name: Search native APK resources
-        run: |
           mkdir -p analysis/native
 
-          find apk -type f \
-            \( -name '*.xml' -o -name '*.json' -o -name '*.properties' \
-               -o -name '*.txt' -o -name '*.smali' \) \
+          echo "=== ABI directories ===" \
+            | tee analysis/native/abis.txt
+
+          find apk/lib \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -printf '%f\n' \
+            2>/dev/null \
+            | sort \
+            | tee -a analysis/native/abis.txt || true
+
+          echo
+          echo "=== Hermes libraries ===" \
+            | tee analysis/native/hermes-libs.txt
+
+          find apk/lib \
+            -type f \
+            \( \
+              -name 'libhermes*.so' \
+              -o -name '*hermes*.so' \
+            \) \
+            -print \
+            | sort \
+            | tee -a analysis/native/hermes-libs.txt || true
+
+          echo
+          echo "=== x86_64 libraries ==="
+
+          if [ -d apk/lib/x86_64 ]; then
+            find apk/lib/x86_64 \
+              -maxdepth 1 \
+              -type f \
+              -printf '%f\n' \
+              | sort
+          else
+            echo "x86_64 directory not present."
+          fi
+
+      # ============================================================
+      # Extract DEX information
+      # ============================================================
+      - name: Inspect DEX files
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p analysis/dex
+
+          find apk \
+            -maxdepth 1 \
+            -type f \
+            -name 'classes*.dex' \
+            -print \
+            | sort \
+            | tee analysis/dex/files.txt
+
+          echo
+          echo "DEX sizes:"
+          du -h apk/classes*.dex 2>/dev/null || true
+
+          echo
+          echo "DEX strings relevant to networking/Supabase:"
+
+          for dex in apk/classes*.dex; do
+            echo
+            echo "===== $dex ====="
+
+            strings -a "$dex" 2>/dev/null |
+              grep -Ei \
+                'supabase|apikey|publishable|scans|dump|bucket|storage|catalog' \
+              | sort -u \
+              | head -500 \
+              || true
+          done > analysis/dex/relevant-strings.txt
+
+      # ============================================================
+      # Install Hermes tooling
+      # ============================================================
+      - name: Install Hermes tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 -m pip install --upgrade pip
+
+          python3 -m pip install hermes-dec
+
+          echo
+          echo "Hermes tools:"
+          command -v hbc-file-parser || true
+          command -v hbc-disassembler || true
+          command -v hbc-decompiler || true
+
+      # ============================================================
+      # Inspect Hermes header
+      # ============================================================
+      - name: Inspect Hermes header
+        shell: bash
+        run: |
+          set -o pipefail
+
+          hbc-file-parser \
+            analysis/index.android.bundle \
+            > analysis/hermes-header.txt \
+            2>&1 || true
+
+          cat analysis/hermes-header.txt
+
+      # ============================================================
+      # Disassemble Hermes bytecode
+      # ============================================================
+      - name: Disassemble Hermes bytecode
+        shell: bash
+        run: |
+          set -o pipefail
+
+          hbc-disassembler \
+            analysis/index.android.bundle \
+            analysis/app.hasm \
+            > analysis/disassembler.log \
+            2>&1 || true
+
+          cat analysis/disassembler.log
+
+          if [ -f analysis/app.hasm ]; then
+            echo
+            echo "Disassembly size:"
+            wc -c analysis/app.hasm
+          fi
+
+      # ============================================================
+      # Decompile Hermes bytecode
+      # ============================================================
+      - name: Decompile Hermes bytecode
+        shell: bash
+        run: |
+          set -o pipefail
+
+          hbc-decompiler \
+            analysis/index.android.bundle \
+            analysis/app.js \
+            > analysis/decompiler.log \
+            2>&1 || true
+
+          cat analysis/decompiler.log
+
+          if [ -f analysis/app.js ]; then
+            echo
+            echo "Decompiled source size:"
+            wc -c analysis/app.js
+          fi
+
+      # ============================================================
+      # Extract raw strings
+      # ============================================================
+      - name: Extract Hermes strings
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          strings -a \
+            analysis/index.android.bundle \
+            > analysis/bundle-strings.txt
+
+          wc -l analysis/bundle-strings.txt
+
+      # ============================================================
+      # Search for Supabase configuration
+      # ============================================================
+      - name: Search Supabase configuration
+        shell: bash
+        run: |
+          set -o pipefail
+
+          grep -Ein -C 30 \
+            'supabase|createClient|SUPABASE|SUPABASE_PUBLISHABLE_KEY|apikey|publishable|anon|jwt|token' \
+            analysis/app.hasm \
+            > analysis/supabase-disassembly.txt \
+            || true
+
+          grep -Ein -C 30 \
+            'supabase|createClient|SUPABASE|SUPABASE_PUBLISHABLE_KEY|apikey|publishable|anon|jwt|token' \
+            analysis/app.js \
+            > analysis/supabase-decompiled.txt \
+            || true
+
+          grep -Ein \
+            'supabase|createClient|SUPABASE|SUPABASE_PUBLISHABLE_KEY|apikey|publishable|anon|jwt|token' \
+            analysis/bundle-strings.txt \
+            > analysis/supabase-strings.txt \
+            || true
+
+      # ============================================================
+      # Search dump/scanning implementation
+      # ============================================================
+      - name: Search dump and scan implementation
+        shell: bash
+        run: |
+          set -o pipefail
+
+          PATTERN='buildDumpExports|dump_binary|catalog_item_id|unlocked_dump_file_count|scans|unlocked|bucket|download|createSignedUrl|createSignedUploadUrl'
+
+          grep -Ein -C 50 \
+            "$PATTERN" \
+            analysis/app.hasm \
+            > analysis/dump-disassembly.txt \
+            || true
+
+          grep -Ein -C 50 \
+            "$PATTERN" \
+            analysis/app.js \
+            > analysis/dump-decompiled.txt \
+            || true
+
+          grep -Ein \
+            "$PATTERN" \
+            analysis/bundle-strings.txt \
+            > analysis/dump-strings.txt \
+            || true
+
+      # ============================================================
+      # Search actual URLs, API routes, buckets and object paths
+      # ============================================================
+      - name: Extract URLs and paths
+        shell: bash
+        run: |
+          set -o pipefail
+
+          {
+            echo "=============================="
+            echo "FULL URL STRINGS"
+            echo "=============================="
+
+            grep -Eo \
+              'https?://[^"'\''[:space:]<>]+' \
+              analysis/bundle-strings.txt \
+              | sort -u \
+              || true
+
+            echo
+            echo "=============================="
+            echo "API / STORAGE PATHS"
+            echo "=============================="
+
+            grep -Eo \
+              '/[A-Za-z0-9_.?=&%${}:;@+,\-]+(/[A-Za-z0-9_.?=&%${}:;@+,\-]+)*' \
+              analysis/bundle-strings.txt \
+              | grep -Ei \
+                'api|rest|storage|scan|dump|bucket|catalog|image|bin|unlock|signed' \
+              | sort -u \
+              || true
+
+            echo
+            echo "=============================="
+            echo "BUCKET NAMES"
+            echo "=============================="
+
+            grep -Eio \
+              '[A-Za-z0-9_-]*(bucket|images|photos|dumps)[A-Za-z0-9_-]*' \
+              analysis/bundle-strings.txt \
+              | sort -u \
+              || true
+
+            echo
+            echo "=============================="
+            echo "BIN / DUMP PATHS"
+            echo "=============================="
+
+            grep -Eio \
+              '[^"'\''[:space:]]+\.(bin|dump|dat)(\?[^"'\''[:space:]]*)?' \
+              analysis/bundle-strings.txt \
+              | sort -u \
+              || true
+
+          } > analysis/urls-and-paths.txt
+
+          cat analysis/urls-and-paths.txt
+
+      # ============================================================
+      # Context around createClient
+      # ============================================================
+      - name: Extract createClient context
+        shell: bash
+        run: |
+          set -o pipefail
+
+          mkdir -p analysis/context
+
+          grep -Ein -C 100 \
+            'createClient' \
+            analysis/app.hasm \
+            > analysis/context/createClient.hasm.txt \
+            || true
+
+          grep -Ein -C 100 \
+            'createClient' \
+            analysis/app.js \
+            > analysis/context/createClient.js.txt \
+            || true
+
+      # ============================================================
+      # Context around dump functions
+      # ============================================================
+      - name: Extract dump contexts
+        shell: bash
+        run: |
+          set -o pipefail
+
+          for term in \
+            buildDumpExports \
+            dump_binary \
+            catalog_item_id \
+            unlocked_dump_file_count \
+            scans \
+            unlocked \
+            bucket \
+            createSignedUrl \
+            download
+          do
+            safe="$(echo "$term" | tr '/ ' '__')"
+
+            {
+              echo "=================================================="
+              echo "TERM: $term"
+              echo "=================================================="
+
+              echo
+              echo "===== HERMES DISASSEMBLY ====="
+
+              grep -Ein -C 100 \
+                "$term" \
+                analysis/app.hasm \
+                || true
+
+              echo
+              echo "===== DECOMPILED ====="
+
+              grep -Ein -C 100 \
+                "$term" \
+                analysis/app.js \
+                || true
+
+            } > "analysis/context/${safe}.txt"
+          done
+
+      # ============================================================
+      # Search APK resources/configuration
+      # ============================================================
+      - name: Search APK configuration
+        shell: bash
+        run: |
+          set -o pipefail
+
+          find apk \
+            -type f \
+            \( \
+              -name '*.xml' \
+              -o -name '*.json' \
+              -o -name '*.properties' \
+              -o -name '*.txt' \
+              -o -name '*.smali' \
+            \) \
             -print0 2>/dev/null |
           xargs -0 grep -Ein \
-            'supabase|SUPABASE|apikey|publishable|bucket|scans|dump|storage' \
-            > analysis/native/config-search.txt || true
+            'supabase|SUPABASE|apikey|publishable|bucket|scans|dump|storage|catalog' \
+            > analysis/apk-config-search.txt \
+            || true
 
-      - name: Package analysis
+      # ============================================================
+      # Create a compact report
+      # ============================================================
+      - name: Create report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "YKWArkScanner Hermes Analysis"
+            echo "=============================="
+            echo
+
+            echo "APK:"
+            ls -lh YKWArkScanner.apk
+            echo
+
+            echo "Hermes bundle:"
+            ls -lh analysis/index.android.bundle
+            echo
+
+            echo "Hermes header:"
+            cat analysis/hermes-header.txt || true
+            echo
+
+            echo "Native ABIs:"
+            cat analysis/native/abis.txt || true
+            echo
+
+            echo "Supabase strings:"
+            cat analysis/supabase-strings.txt || true
+            echo
+
+            echo "Dump/scans strings:"
+            cat analysis/dump-strings.txt || true
+            echo
+
+            echo "URLs and paths:"
+            cat analysis/urls-and-paths.txt || true
+
+          } > analysis/REPORT.txt
+
+          cat analysis/REPORT.txt
+
+      # ============================================================
+      # Upload analysis artifact
+      # ============================================================
+      - name: Upload Hermes analysis
         uses: actions/upload-artifact@v4
         with:
-          name: hermes-analysis
+          name: YKWArkScanner-hermes-analysis
           path: |
-            hermes-header.txt
-            app.hasm
-            app.js
-            bundle-strings.txt
             analysis/
+          if-no-files-found: warn
           retention-days: 7
