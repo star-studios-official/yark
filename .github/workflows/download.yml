@@ -24,7 +24,7 @@ jobs:
       - name: Discover and download public data
         env:
           SUPABASE_URL: https://kgkivhuppcoghmlbqkfo.supabase.co
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_ANON_KEY: sb_publishable_UP0iNN9gSSM-46Kn8GpFHw_wOfaqh1
         run: python scripts/download_public_supabase.py
 
       - name: Upload database dump
