@@ -26,19 +26,20 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: No APK found."
-            echo
             find . -maxdepth 4 -type f | sort
             exit 1
           fi
 
-          echo "APK found:"
-          echo "$APK"
+          echo "APK found: $APK"
 
-          cp "$APK" YKWArkScanner.apk
+          # Don't copy if it is already at the expected path.
+          if [ "$APK" != "./YKWArkScanner.apk" ]; then
+            cp "$APK" ./YKWArkScanner.apk
+          fi
 
-          echo
-          echo "APK size:"
-          ls -lh YKWArkScanner.apk
+          echo "Using APK:"
+          ls -lh ./YKWArkScanner.apk
+ 
 
       # ============================================================
       # Extract APK
